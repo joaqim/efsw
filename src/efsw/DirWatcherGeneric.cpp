@@ -5,7 +5,7 @@
 
 namespace efsw {
 
-DirWatcherGeneric::DirWatcherGeneric( DirWatcherGeneric * parent, WatcherGeneric * ws, const std::string& directory, bool recursive ) :
+DirWatcherGeneric::DirWatcherGeneric( DirWatcherGeneric * parent, WatcherGeneric * ws, const std::string& directory, bool recursive, bool reportNewFiles ) :
 	Parent( parent ),
 	Watch( ws ),
 	Recursive( recursive ),
@@ -13,7 +13,24 @@ DirWatcherGeneric::DirWatcherGeneric( DirWatcherGeneric * parent, WatcherGeneric
 {
 	resetDirectory( directory );
 
-	DirSnap.scan();
+	if ( !reportNewFiles )
+	{
+		DirSnap.scan();
+	}
+	else
+	{
+		DirectorySnapshotDiff Diff = DirSnap.scan();
+
+		if ( Diff.changed() )
+		{
+			FileInfoList::iterator it;
+
+			DiffIterator( FilesCreated )
+			{
+				handleAction( ( *it ).Filepath, Actions::Add );
+			}
+		}
+	}
 }
 
 DirWatcherGeneric::~DirWatcherGeneric()
@@ -65,6 +82,8 @@ void DirWatcherGeneric::resetDirectory( std::string directory )
 			/// Get the real directory
 			if ( NULL != Parent )
 			{
+				FileSystem::dirAddSlashAtEnd(directory);
+
 				dir = Parent->DirSnap.DirectoryInfo.Filepath + directory;
 			}
 			else
@@ -82,7 +101,7 @@ void DirWatcherGeneric::handleAction( const std::string &filename, unsigned long
 	Watch->Listener->handleFileAction( Watch->ID, DirSnap.DirectoryInfo.Filepath, FileSystem::fileNameFromPath( filename ), (Action)action, oldFilename );
 }
 
-void DirWatcherGeneric::addChilds()
+void DirWatcherGeneric::addChilds( bool reportNewFiles )
 {
 	if ( Recursive )
 	{
@@ -91,7 +110,7 @@ void DirWatcherGeneric::addChilds()
 
 		for ( FileInfoMap::iterator it = DirSnap.Files.begin(); it != DirSnap.Files.end(); it++ )
 		{
-			if ( it->second.isDirectory() && it->second.isReadable() )
+			if ( it->second.isDirectory() && it->second.isReadable() && !FileSystem::isRemoteFS( it->second.Filepath ) )
 			{
 				/// Check if the directory is a symbolic link
 				std::string curPath;
@@ -126,9 +145,14 @@ void DirWatcherGeneric::addChilds()
 					}
 				}
 
-				Directories[ dir ] = new DirWatcherGeneric( this, Watch, dir, Recursive );
+				if ( reportNewFiles )
+				{
+					handleAction( dir, Actions::Add );
+				}
 
-				Directories[ dir ]->addChilds();
+				Directories[dir] = new DirWatcherGeneric( this, Watch, dir, Recursive, reportNewFiles );
+
+				Directories[dir]->addChilds( reportNewFiles  );
 			}
 		}
 	}
@@ -172,7 +196,6 @@ void DirWatcherGeneric::watch( bool reportOwnChange )
 		/// Directories
 		DiffIterator( DirsCreated )
 		{
-			handleAction( (*it).Filepath, Actions::Add );
 			createDirectory( (*it).Filepath );
 		}
 
@@ -298,7 +321,7 @@ DirWatcherGeneric * DirWatcherGeneric::createDirectory( std::string newdir )
 
 	FileInfo fi( dir );
 
-	if ( !fi.isDirectory() || !fi.isReadable() )
+	if ( !fi.isDirectory() || !fi.isReadable() || FileSystem::isRemoteFS( dir ) )
 	{
 		return NULL;
 	}
@@ -336,8 +359,13 @@ DirWatcherGeneric * DirWatcherGeneric::createDirectory( std::string newdir )
 
 	if ( !skip )
 	{
+		handleAction( newdir, Actions::Add );
+
 		/// Creates the new directory watcher of the subfolder and check for new files
 		dw = new DirWatcherGeneric( this, Watch, dir, Recursive );
+		
+		dw->addChilds();
+
 		dw->watch();
 
 		/// Add it to the list of directories
